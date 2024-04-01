@@ -1,117 +1,140 @@
+#include <stdio.h>
 #include "pico/stdlib.h"
-#include "EPD_Test.h"
+#include "pico/stdio.h"
+#include "pico/cyw43_arch.h"
+#include "pico/async_context.h"
+#include "lwip/altcp_tls.h"
+
+#include "example_http_client_util.h"
+#include "EPD_printf.h"
 #include "EPD_1in54_V2.h"
 
-int main() {    
-    // Initialize chosen serial port
-    stdio_init_all();
-    printf("Pico Started, will wait 1 minute before EPD actions...\r\n");
+#define HOST "aviationweather.gov"
+#define URL_REQUEST "/api/data/metar?ids=KSEA"
 
-    const uint LED_PIN = PICO_DEFAULT_LED_PIN;
-    //const uint LED_PIN = 25;
-    gpio_init(LED_PIN);
-    gpio_set_dir(LED_PIN, GPIO_OUT);
+#define RXBUF_SZ 4096
 
-    //Blink Once
-    gpio_put(LED_PIN, 1);
-    sleep_ms(250);
-    gpio_put(LED_PIN, 0);
-    sleep_ms(250);
-    //sleep_ms(60*1000);
-    printf("Starting EPD.......\r\n");
+#define REQ_INTERVAL_MS 300000
 
-    DEV_Delay_ms(500);
-    
-    EPD_1in54_V2_test();
+char rxbuf[RXBUF_SZ] = {0};
 
-    UBYTE *BlackImage;
-    UWORD Imagesize = ((EPD_1IN54_V2_WIDTH % 8 == 0)? (EPD_1IN54_V2_WIDTH / 8 ): (EPD_1IN54_V2_WIDTH / 8 + 1)) * EPD_1IN54_V2_HEIGHT;
-    if((BlackImage = (UBYTE *)malloc(Imagesize)) == NULL) {
-        printf("Failed to apply for black memory...\r\n");
-        return -1;
-    }
-
-    // The image of the previous frame must be uploaded, otherwise the
-    // first few seconds will display an exception.
-    EPD_1IN54_V2_DisplayPartBaseImage(BlackImage);
-    Paint_SelectImage(BlackImage);
-    Paint_Clear(WHITE);
-    // enter partial mode
-    EPD_1IN54_V2_Init_Partial();
-    printf("Partial refresh\r\n");
-
-    printf("Going to blink LED now, and brief animation of letter 'A'.......\r\n");
-    int xpos = 0; 
-    int ypos= 0;
-    int xinc = 17;
-    int yinc = 24;
-    int xfact = 1;
-    int yfact = 1;
-    int ledval = 1;
-    int countdown = 100;
-    bool lastTime = true;
-    while (true) {
-        //Keep Blinking
-        gpio_put(LED_PIN, ledval);
-
-        //Animate the character (countdown) times.
-        if (countdown > 0)
+err_t http_client_rx_to_rxbuf(__unused void *arg, __unused struct altcp_pcb *conn, struct pbuf *p, err_t err) {
+    unsigned offset;
+    char cur_char;
+    char* buf_ptr = rxbuf;
+    //TODO(luna) Start at 0.. when u figure out how to parse p_buf proper
+    for (offset = 2; offset < p->tot_len && offset < (sizeof(rxbuf) - 2); offset++) {
+        cur_char = (char)pbuf_get_at(p, offset);
+        printf("%x", cur_char);
+        if ((cur_char >= 'A' && cur_char <= 'z')
+            || (cur_char >= '0' && cur_char <= '9')
+            || cur_char == ' '
+            || cur_char == '$'
+            )
         {
-            //sleep_ms(250);
-            Paint_ClearWindows(xpos, ypos, xpos + Font24.Width, ypos + Font24.Height, WHITE);
-            Paint_DrawChar(xpos, ypos, 'A', &Font24, BLACK, WHITE);
-            EPD_1IN54_V2_DisplayPart(BlackImage);
-            DEV_Delay_ms(100);
-
-            //gpio_put(LED_PIN, 0);
-            Paint_ClearWindows(xpos, ypos, xpos + Font24.Width, ypos + Font24.Height, WHITE);
-            Paint_DrawChar(xpos, ypos, ' ', &Font24, BLACK, WHITE);
-            //sleep_ms(2000);
-            EPD_1IN54_V2_DisplayPart(BlackImage);
-            DEV_Delay_ms(100);
-
-            if (xpos>=0 && xpos+(xfact*xinc)<=EPD_1IN54_V2_WIDTH-1)
-                xfact = xfact;
-            if (xpos>=0 && xpos+(xfact*xinc)>EPD_1IN54_V2_WIDTH-1)
-                xfact = -1 * xfact;
-            if (xpos<0)
-                xfact = -1 * xfact;
-            //Update x-position                
-            xpos = xpos + (xfact*xinc);
-
-            if (ypos>=0 && ypos+(yfact*yinc)<=EPD_1IN54_V2_HEIGHT-1)
-                yfact = yfact;
-            if (ypos>=0 && ypos+(yfact*yinc)>EPD_1IN54_V2_HEIGHT-1)
-                yfact = -1 * yfact;
-            if (ypos<0)
-                yfact = -1 * yfact;
-            //Update y-position
-            ypos = ypos + (yfact*yinc);
-
-            countdown = countdown - 1 ;
+            *(buf_ptr++) = cur_char;
         }
-        else
-            if (lastTime) {
-                EPD_1IN54_V2_Init();
-                EPD_1IN54_V2_Clear();
-
-                printf("Goto Sleep...\r\n");
-                EPD_1IN54_V2_Sleep();
-                free(BlackImage);
-                BlackImage = NULL;
-                DEV_Delay_ms(2000);//important, at least 2s
-                // close 5V
-                printf("close 5V, Module enters 0 power consumption ...\r\n");
-                DEV_Module_Exit();
-
-                lastTime = !(lastTime);
-            }
-            else
-                sleep_ms(500);
-        
-        //flip LED state in next iteration
-        ledval = ledval ^ 1;
     }
+    printf("\n");
+    *buf_ptr = '\0';
+    pbuf_free(p);
+    return ERR_OK;
+}
 
+void establish_wifi_connection() {
+    int result = 0;
+    int retry_count = 0;
+    while ((
+        result = cyw43_arch_wifi_connect_timeout_ms(
+            WIFI_SSID,
+            WIFI_PASSWORD,
+            CYW43_AUTH_WPA2_AES_PSK,
+            10000)
+    )) {
+        retry_count++;
+
+        // high power retry (every 250 ms)
+        if (retry_count < 10) {
+            EPD_printf("Retrying to connect to %s.."
+                       "Attempt: %d, Code %d",
+                       WIFI_SSID, retry_count, result);
+            sleep_ms(250);
+            continue;
+        }
+
+        // lower power retry loop (sleep 5000 ms)
+        if ((retry_count % 10) == 0) {
+            EPD_printf("Retrying to connect to %s.."
+                       "Attempt: %d, Code %d",
+                       WIFI_SSID, retry_count, result);
+        }
+        sleep_ms(5000);
+    }
+}
+
+
+
+int make_web_request() {
+    int result = 0;
+    EXAMPLE_HTTP_REQUEST_T req1 = {0};
+
+    // setup request
+    req1.hostname = HOST;
+    req1.url = URL_REQUEST;
+    req1.headers_fn = NULL;
+    req1.recv_fn = http_client_rx_to_rxbuf;
+    req1.tls_config = altcp_tls_create_config_client(NULL, 0); // https
+
+    // make request
+    result += http_client_request_sync(cyw43_arch_async_context(), &req1);
+    if (result != 0) {
+        printf("Web request ret %d\n", result);
+    }
+    altcp_tls_free_config(req1.tls_config);
+    return result;
+}
+
+void debug_print_rxbuf(void) {
+    char* cur_buf;
+    printf("rxbuf: ");
+    for (
+        cur_buf = rxbuf;
+        (*cur_buf != '\0' && cur_buf < rxbuf + sizeof(rxbuf));
+        cur_buf++)
+    {
+        printf("%x", *cur_buf);
+    }
+    printf("\n");
+}
+
+int main() {
+    int ret = 0;
+    int webreq_ret = 0;
+SYS_INIT:
+    stdio_init_all();
+    if (cyw43_arch_init()) {
+        printf("failed to initialise\n");
+        return 1;
+    }
+    EPD_init();
+    cyw43_arch_enable_sta_mode();
+START_CONNECTION:
+    if (webreq_ret == 0) {
+        EPD_printf("Connecting to WLAN:\n  %s", WIFI_SSID);
+    } else {
+        EPD_printf("Reconnecting to WLAN\nPrev WebReq Ret: %d", webreq_ret);
+    }
+    establish_wifi_connection();
+MAKE_REQUEST:
+    if ((webreq_ret = make_web_request())) {
+        goto START_CONNECTION;
+    }
+    debug_print_rxbuf();
+    EPD_print(rxbuf);
+    printf("Data displayed, sleeping for %dms\n", REQ_INTERVAL_MS);
+    sleep_ms(REQ_INTERVAL_MS);
+    goto MAKE_REQUEST;
+EXIT:
+    cyw43_arch_deinit();
     return 0;
 }

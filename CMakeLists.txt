@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.12)
 include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 
 # Set name of project (as PROJECT_NAME) and C/C++ Standard
-project(epd1in54 C CXX ASM)
+project(picow-metar C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
@@ -17,6 +17,7 @@ add_subdirectory(lib/Config)
 add_subdirectory(lib/e-Paper)
 add_subdirectory(lib/Fonts)
 add_subdirectory(lib/GUI)
+add_subdirectory(lib/HTTP)
 add_subdirectory(examples)
 
 # add a header directory
@@ -24,13 +25,27 @@ include_directories(examples)
 include_directories(./lib/Config)
 include_directories(./lib/GUI)
 include_directories(./lib/e-Paper)
+include_directories(./lib/HTTP)
+
+if (DEFINED ENV{WIFI_SSID} AND (NOT WIFI_SSID))
+	set(WIFI_SSID $ENV{WIFI_SSID})
+	message("Using WIFI_SSID from environment ('${WIFI_SSID}')")
+endif()
+
+if (DEFINED ENV{WIFI_PASSWORD} AND (NOT WIFI_PASSWORD))
+	set(WIFI_PASSWORD $ENV{WIFI_PASSWORD})
+	message("Using WIFI_PASSWORD from environment")
+endif()
 
 add_executable(${PROJECT_NAME}
         main.c
         )
-
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+        WIFI_SSID=\"${WIFI_SSID}\"
+        WIFI_PASSWORD=\"${WIFI_PASSWORD}\"
+	)
 # pull in common dependencies
-target_link_libraries(${PROJECT_NAME} 
+target_link_libraries(${PROJECT_NAME}
 		pico_stdlib
 		hardware_spi
 		examples
@@ -38,8 +53,8 @@ target_link_libraries(${PROJECT_NAME}
 		GUI
 		Fonts
 		Config
+		example_lwip_http_util
 )
-
 
 # create map/bin/hex file etc.
 pico_add_extra_outputs(${PROJECT_NAME})

@@ -3,6 +3,7 @@
 aux_source_directory(. DIR_ePaper_SRCS)
 
 include_directories(../Config)
+include_directories(../GUI)
 
 # Generate the link library
 add_library(ePaper ${DIR_ePaper_SRCS})
